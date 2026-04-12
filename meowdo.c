@@ -135,7 +135,7 @@ static const char *bongo_mood(int p) {
     if (p==0)                  return "  add a task nya~";
     if (p==1)                  return "  one more! you got it!";
     if (p<=3)                  return "  almost there, meow~";
-    if (p<=7)                  return "  *meow meow my friend this is a lot*";
+    if (p<=7)                  return "  *meow meow! you productive nya~*";
     return                            "  !!so many tasks hiss! ";
 }
 
