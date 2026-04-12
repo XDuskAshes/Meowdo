@@ -1,7 +1,7 @@
 # meowdo – a cat todo list for your terminal
 
 meowdo is a cute, keyboard-driven todo list with a cat sidekick.  
-It runs in your terminal, supports tags, search, pinning, and saves everything in `~/.meowdo/todos.txt`.
+It runs in your terminal, supports tags, search, pinning, and saves everything in `~/.local/share/meowdo/todos.txt`.
 
 ![SmartStatus screenshot](Meowdo.png)
 *(A colorful ncurses UI with a cat and tasks)*
@@ -15,7 +15,7 @@ It runs in your terminal, supports tags, search, pinning, and saves everything i
 - **progress bar** – shows how many tasks are done
 - **freaky cat** – changes mood depending on pending tasks
 - **celebration** – all tasks done? kitty party!
-- **persistent** – data saved to `~/.meowdo/todos.txt`
+- **persistent** – data saved to `~/.local/share/meowdo/todos.txt`
 - **vim-like keys** – `j`/`k`, `g`/`G`, `PgUp`/`PgDn`
 
 ## Dependencies
@@ -42,7 +42,7 @@ make
 ```
 
 This will compile the program using the provided `Makefile`.  
-**Do not run as root** – the program writes to `~/.meowdo/`.
+**Do not run as root** – the program writes to `~/.local/share/meowdo/`.
 
 ## Usage
 
@@ -73,7 +73,7 @@ This will compile the program using the provided `Makefile`.
 
 ## Data Storage
 
-- **Directory:** `~/.meowdo/`
+- **Directory:** `~/.local/share/meowdo/`
 - **File:** `todos.txt` – plain text, editable (but careful with the format)
 
 ### Line format:
@@ -96,4 +96,4 @@ P|x|work|review PR|1678896000|1678899600
 ## About
 
 meowdo is a cute, keyboard-driven todo list with a cat sidekick.  
-It lives in your terminal, supports tags, search, pinning, and remembers everything in `~/.meowdo/todos.txt`.
+It lives in your terminal, supports tags, search, pinning, and remembers everything in `~/.local/share/meowdo/todos.txt`.
