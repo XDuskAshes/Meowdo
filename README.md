@@ -60,7 +60,7 @@ nix.settings.experimental-features = [
 ];
 ```
 
-And rebuild, then run: `nix build .` in the project folder.
+And rebuild, then run `nix build .` in the project folder.
 
 This will compile the program using the provided `Makefile`.  
 **Do not run as root** – the program writes to `~/.meowdo/`.
