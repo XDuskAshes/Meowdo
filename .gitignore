@@ -1,3 +1,15 @@
 # for nix flake
-
 result
+
+# Build outputs
+meowdo
+*.o
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Temporary files
+todos.txt.tmp
+*.tmp
