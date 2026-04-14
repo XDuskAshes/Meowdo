@@ -28,7 +28,9 @@
  * line format: <P|->|<x| >|<tag>|<text>|<created_ts>|<done_ts>
  */
 
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
+#endif
 #include <ncurses.h>
 #include <locale.h>
 #include <stdlib.h>
