@@ -29,6 +29,11 @@ stdenv.mkDerivation rec {
     '';
 
     meta = with lib; {
-        description = "meowdo deriv test";
+        description = "a cute, keyboard-driven todo list with a cat sidekick.";
+        longDescription = ''
+            meowdo is a cute, keyboard-driven todo list with a cat sidekick. It lives inyour terminal, supports tags, search, pinning, and remembers everything in ~/.local/share/meowdo/todos.txt 
+        ''
+        homepage = https://github.com/Sycorlax/Meowdo/;
+        license = licenses.gpl3;
     };
 }
