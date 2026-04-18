@@ -52,7 +52,7 @@
 
 /* layout breakpoints */
 #define MIN_COLS_FULL    80   /* below this: hide right pane */
-#define MIN_COLS_COMPACT 30   /* below this: too small overlay */
+#define MIN_COLS_COMPACT 20   /* below this: too small overlay */
 #define MIN_ROWS         8    /* below this: too small overlay */
 
 typedef enum { LAYOUT_FULL, LAYOUT_COMPACT, LAYOUT_TOOSMALL } Layout;
@@ -423,7 +423,7 @@ static void draw_sbar(WINDOW *w,int cols){
     mvwprintw(w,0,0,"%*s",cols,"");
     if(cols>100)
         mvwprintw(w,0,1," n:new  e:edit  Spc:done  p:pin  t:tag  d:del  D:del-all  /:search  0-6:filter  Esc:clear  q:quit");
-    else if(cols>60)
+    else if(cols>50)
         mvwprintw(w,0,1," n:new  e:edit  Spc:done  d:del  D:all  /:search  q:quit");
     else
         mvwprintw(w,0,1," n  e  Spc  d  D  /  q");
