@@ -50,6 +50,13 @@
 #define LIST_Y0       4
 #define BC_H         10
 
+/* layout breakpoints */
+#define MIN_COLS_FULL    80   /* below this: hide right pane */
+#define MIN_COLS_COMPACT 30   /* below this: too small overlay */
+#define MIN_ROWS         8    /* below this: too small overlay */
+
+typedef enum { LAYOUT_FULL, LAYOUT_COMPACT, LAYOUT_TOOSMALL } Layout;
+
 /* ------ colour pairs ------ */
 enum {
     C_BORDER=1, C_TOPBAR=2, C_SEL=3,    C_DONE=4,  C_PEND=5,
@@ -76,7 +83,6 @@ static const char *BONGO_UTF8[BC_H] = {
     "\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x80\xe2\xa0\x91\xe2\xa0\x80\xe2\xa0\x80",
 };
 
-/* ── bongo art: ASCII fallback ── */
 /* ── bongo art: ASCII fallback ── */
 static const char *BONGO_ASCII[BC_H] = {
     "        .       .        ",
@@ -148,7 +154,6 @@ static bool detect_utf8(void) {
     for (int i = 0; vars[i]; i++) {
         const char *v = getenv(vars[i]);
         if (!v || !*v) continue;
-        /* case-insensitive search for "utf" */
         char buf[strlen(v) + 1]; int j;
         for (j=0; v[j] && j<63; j++) buf[j]=(char)tolower((unsigned char)v[j]);
         buf[j]='\0';
@@ -166,12 +171,9 @@ static void set_smsg(const char *m) {
 static char* todo_path;
 size_t todo_path_length;
 static void build_paths(void) {
-    //We use a 64-char buffer for the fixed strings added here
-    //Should that buffer become too short, increase this value
     #define LOCAL_BUFFER_SIZE 64
 
     const char *home=getenv("HOME");
-    /* $XDG_DATA_HOME/meowdo  (defaults to ~/.local/share/meowdo) */
     const char *xdg=getenv("XDG_DATA_HOME");
 
     size_t base_length = 2;
@@ -223,7 +225,7 @@ static void rebuild_tag_cache(void) {
 }
 static void mark_dirty(void){ tags_dirty=1; }
 
-/* one pass to count pending/done/pinned --- reused by all draw calls */
+/* one pass to count pending/done/pinned */
 static void recount(void) {
     g_pend=0; g_done_c=0; g_pin_c=0;
     for (int i=0;i<todo_count;i++){
@@ -319,10 +321,18 @@ static void fmt_ts(time_t ts,char *buf,int buflen){
     else   strncpy(buf,"?",(size_t)buflen);
 }
 
-/* ------ popup (supports pre-filled text for edit) ------ */
+/* ------ layout detection ------ */
+static Layout get_layout(int rows, int cols) {
+    if (rows < MIN_ROWS || cols < MIN_COLS_COMPACT) return LAYOUT_TOOSMALL;
+    if (cols < MIN_COLS_FULL)                        return LAYOUT_COMPACT;
+    return LAYOUT_FULL;
+}
+
+/* ------ popup ------ */
 static int popup(const char *title,const char *hint,char *out,int maxlen){
     int rows,cols; getmaxyx(stdscr,rows,cols);
     int pw=(cols<74)?cols-4:74, ph=7;
+    if(pw<20||rows<ph+2) return 0;   /* terminal too small for popup */
     int py=rows/2-ph/2, px=(cols-pw)/2;
     WINDOW *p=newwin(ph,pw,py,px); if(!p) return 0;
 
@@ -354,6 +364,28 @@ static int popup(const char *title,const char *hint,char *out,int maxlen){
     }
     curs_set(0); delwin(p); touchwin(stdscr); refresh();
     return(!cancelled&&len>0);
+}
+
+/* ------ draw: too small overlay ------ */
+static void draw_toosmall(int rows, int cols) {
+    erase();
+    attron(COLOR_PAIR(C_TOPBAR)|A_BOLD);
+    for(int r=0;r<rows;r++) mvhline(r,0,' ',cols);
+
+    static const char *lines[] = {
+        "=^..^=",
+        "terminal too small~",
+        "please resize nya!",
+    };
+    int n = 3;
+    int sy = rows/2 - n/2; if(sy<0) sy=0;
+    for(int i=0;i<n&&sy+i<rows;i++){
+        int slen=(int)strlen(lines[i]);
+        int sx=(cols-slen)/2; if(sx<0)sx=0;
+        mvprintw(sy+i, sx, "%s", lines[i]);
+    }
+    attroff(COLOR_PAIR(C_TOPBAR)|A_BOLD);
+    refresh();
 }
 
 /* ------ draw: top bar ------ */
@@ -447,11 +479,24 @@ static void draw_left(WINDOW *w,int h,int lw,int top){
     werase(w);
     wattron(w,COLOR_PAIR(C_BORDER)|A_BOLD); box(w,0,0); wattroff(w,COLOR_PAIR(C_BORDER)|A_BOLD);
     wattron(w,COLOR_PAIR(C_HDR)|A_BOLD);   mvwprintw(w,0,2,"[ TODO ]"); wattroff(w,COLOR_PAIR(C_HDR)|A_BOLD);
-    wattron(w,COLOR_PAIR(C_PIN)|A_BOLD);   mvwprintw(w,0,lw-10," %d left ",g_pend); wattroff(w,COLOR_PAIR(C_PIN)|A_BOLD);
 
-    draw_progress(w,1,2,lw-22);
+    /* " N left" label — only if it fits */
+    char leftlabel[20]; snprintf(leftlabel,sizeof leftlabel," %d left ",g_pend);
+    int llen=(int)strlen(leftlabel);
+    if(lw>llen+12){
+        wattron(w,COLOR_PAIR(C_PIN)|A_BOLD);
+        mvwprintw(w,0,lw-llen-1,"%s",leftlabel);
+        wattroff(w,COLOR_PAIR(C_PIN)|A_BOLD);
+    }
 
-    wattron(w,A_DIM); mvwprintw(w,2,2,"  [/] #tag        task"); wattroff(w,A_DIM);
+    /* progress bar — only if enough width */
+    int pbw = lw - 22;
+    if(pbw >= 4) draw_progress(w,1,2,pbw);
+
+    /* column header — only if wide enough */
+    if(lw > 20){
+        wattron(w,A_DIM); mvwprintw(w,2,2,"  [/] #tag        task"); wattroff(w,A_DIM);
+    }
     wattron(w,COLOR_PAIR(C_BORDER)|A_DIM); mvwhline(w,3,1,ACS_HLINE,lw-2); wattroff(w,COLOR_PAIR(C_BORDER)|A_DIM);
 
     int area=h-LIST_Y0-1; if(area<1)area=1;
@@ -498,16 +543,16 @@ static void draw_left(WINDOW *w,int h,int lw,int top){
         else                col_attr=COLOR_PAIR(C_PEND)|A_BOLD;
         wattron(w,col_attr); mvwprintw(w,row,2,"%c [%c]",mark,box_ch);
 
-        /* tag pill */
+        /* tag pill — only if enough room */
         int tx=8;
-        if(t->tag[0]&&strcmp(t->tag,"none")!=0){
+        if(t->tag[0]&&strcmp(t->tag,"none")!=0 && lw>tx+12){
             int tc=tag_color(t->tag), tcnt=tag_cnt_for[vis[vi]];
             if(!is_sel){wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(tc)|A_BOLD);}
             mvwprintw(w,row,tx,"#%.*s(%d)",5,t->tag,tcnt);
             tx+=9;
         }
 
-        int avail=lw-tx-4; if(avail<4)avail=4;
+        int avail=lw-tx-4; if(avail<1)avail=1;
         if     (is_sel)   {wattron(w,COLOR_PAIR(C_SEL)|A_BOLD);}
         else if(t->done)  {wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_DONE)|A_DIM);}
         else if(t->pinned){wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_PIN));}
@@ -521,18 +566,20 @@ static void draw_left(WINDOW *w,int h,int lw,int top){
 /* ------ draw: right pane ------ */
 static void draw_right(WINDOW *w,int h,int rw){
     if(!w) return;
-    (void)rw;
     werase(w);
     wattron(w,COLOR_PAIR(C_BORDER)|A_DIM); box(w,0,0); wattroff(w,COLOR_PAIR(C_BORDER)|A_DIM);
     int ww=getmaxx(w);
-    int bx=ww-20; if(bx<1)bx=1;
 
-    /* bongo cat */
-    wattron(w,COLOR_PAIR(C_BONGO)|A_BOLD);
-    for(int i=0;i<BC_H&&i+1<h-2;i++) mvwprintw(w,i+1,bx,"%s",BONGO[i]);
-    wattroff(w,COLOR_PAIR(C_BONGO)|A_BOLD);
+    /* bongo cat — only draw if right pane is wide enough */
+    int bx = ww - 20;
+    if(bx >= 1 && rw >= 22){
+        wattron(w,COLOR_PAIR(C_BONGO)|A_BOLD);
+        for(int i=0;i<BC_H&&i+1<h-2;i++) mvwprintw(w,i+1,bx,"%s",BONGO[i]);
+        wattroff(w,COLOR_PAIR(C_BONGO)|A_BOLD);
+    }
 
-    int ca=bx-3; if(ca<6){wnoutrefresh(w);return;}
+    int ca = (bx >= 1 && rw >= 22) ? bx-3 : ww-4;
+    if(ca < 4){ wnoutrefresh(w); return; }
 
     wattron(w,COLOR_PAIR(C_HDR)|A_BOLD); mvwprintw(w,0,2,"[ MEOWDO ]"); wattroff(w,COLOR_PAIR(C_HDR)|A_BOLD);
 
@@ -542,7 +589,7 @@ static void draw_right(WINDOW *w,int h,int rw){
     wattron(w,COLOR_PAIR(C_PIN)|A_BOLD);   mvwprintw(w,4,2," ^ pinned  : %d",g_pin_c);   wattroff(w,COLOR_PAIR(C_PIN)|A_BOLD);
     wattron(w,A_DIM);                      mvwprintw(w,5,2," # total   : %d",todo_count); wattroff(w,A_DIM);
 
-    /* right-pane mini progress */
+    /* mini progress */
     if(todo_count>0){
         int bw=ca-8; if(bw>20)bw=20; if(bw<4)bw=4;
         wattron(w,COLOR_PAIR(C_BORDER)|A_DIM); mvwhline(w,6,2,ACS_HLINE,ca); wattroff(w,COLOR_PAIR(C_BORDER)|A_DIM);
@@ -605,7 +652,7 @@ static void draw_right(WINDOW *w,int h,int rw){
         }
     }
 
-    /* mood --- pinned to bottom */
+    /* mood pinned to bottom */
     {
         const char *mood=bongo_mood(g_pend);
         int mlen=(int)strlen(mood), mx=ww-mlen-1; if(mx<1)mx=1;
@@ -616,10 +663,37 @@ static void draw_right(WINDOW *w,int h,int rw){
     wnoutrefresh(w);
 }
 
-int get_left_window_width(int cols){
+static int get_left_window_width(int cols){
     #define LEFT_WINDOW_MIN_WIDTH 20
     int lw=cols*58/100; if(lw<LEFT_WINDOW_MIN_WIDTH)lw=LEFT_WINDOW_MIN_WIDTH;
     return lw;
+}
+
+/* ------ window allocation helper ------ */
+typedef struct {
+    WINDOW *top, *left, *rite, *sbar;
+} Windows;
+
+static void free_windows(Windows *w){
+    if(w->top)  { delwin(w->top);  w->top=NULL;  }
+    if(w->left) { delwin(w->left); w->left=NULL; }
+    if(w->rite) { delwin(w->rite); w->rite=NULL; }
+    if(w->sbar) { delwin(w->sbar); w->sbar=NULL; }
+}
+
+static bool alloc_windows(Windows *w, int rows, int cols, int lw, int rw, int ch, Layout layout){
+    free_windows(w);
+    w->top  = newwin(1,   cols, 0,      0);
+    w->sbar = newwin(1,   cols, rows-1, 0);
+    if(layout == LAYOUT_FULL){
+        w->left = newwin(ch, lw,   1,  0);
+        w->rite = newwin(ch, rw,   1, lw);
+    } else {
+        /* compact: left pane takes full width */
+        w->left = newwin(ch, cols, 1, 0);
+        w->rite = NULL;
+    }
+    return (w->top && w->left && w->sbar);
 }
 
 /* ------ main ------ */
@@ -658,52 +732,64 @@ int main(void){
     todos_load(); rebuild_vis(); rebuild_tag_cache();
     erase(); refresh();
 
-    int rows,cols; getmaxyx(stdscr,rows,cols);
-    int lw=get_left_window_width(cols);
-    int rw=cols-lw, ch=rows-2;
+    int rows, cols; getmaxyx(stdscr, rows, cols);
+    Layout layout = get_layout(rows, cols);
+    int lw = get_left_window_width(cols);
+    int rw = cols - lw;
+    int ch = rows - 2;
 
-    WINDOW *top =newwin(1,  cols, 0,      0);
-    WINDOW *left=newwin(ch, lw,   1,      0);
-    WINDOW *rite=newwin(ch, rw,   1,      lw);
-    WINDOW *sbar=newwin(1,  cols, rows-1, 0);
-    if(!top||!left||!rite||!sbar){endwin();puts("failed to create windows");return 1;}
+    Windows win = {NULL,NULL,NULL,NULL};
+    if(layout != LAYOUT_TOOSMALL){
+        alloc_windows(&win, rows, cols, lw, rw, ch, layout);
+    }
 
-    int list_top=0;
-    bool running=true;
+    int list_top = 0;
+    bool running = true;
 
     while(running){
-        int nr,nc; getmaxyx(stdscr,nr,nc);
-        if(nr!=rows||nc!=cols){
-            rows=nr; cols=nc;
-            lw=get_left_window_width(cols);
-            rw=cols-lw; ch=rows-2;
-            delwin(top);delwin(left);delwin(rite);delwin(sbar);
-            top =newwin(1,  cols, 0,      0);
-            left=newwin(ch, lw,   1,      0);
-            rite=newwin(ch, rw,   1,      lw);
-            sbar=newwin(1,  cols, rows-1, 0);
-            if(!top||!left||!rite||!sbar) break;
+        int nr, nc; getmaxyx(stdscr, nr, nc);
+        Layout new_layout = get_layout(nr, nc);
+
+        if(nr!=rows || nc!=cols || new_layout!=layout){
+            rows=nr; cols=nc; layout=new_layout;
+            lw = get_left_window_width(cols);
+            rw = cols - lw;
+            ch = rows - 2; if(ch < 1) ch = 1;
+            free_windows(&win);
             erase(); refresh();
+            if(layout != LAYOUT_TOOSMALL){
+                alloc_windows(&win, rows, cols, lw, rw, ch, layout);
+            }
+        }
+
+        if(layout == LAYOUT_TOOSMALL){
+            draw_toosmall(rows, cols);
+            timeout(200);
+            int key = getch();
+            if(key == 'q') running = false;
+            continue;
         }
 
         if(tags_dirty) rebuild_tag_cache();
         recount();
 
-        int area=ch-LIST_Y0-1; if(area<1)area=1;
+        int pane_w = (layout == LAYOUT_FULL) ? lw : cols;
+        int area = ch - LIST_Y0 - 1; if(area<1)area=1;
         if(sel<list_top)       list_top=sel;
         if(sel>=list_top+area) list_top=sel-area+1;
         if(list_top<0)         list_top=0;
 
-        draw_top  (top,  cols);
-        draw_left (left, ch, lw, list_top);
-        draw_right(rite, ch, rw);
-        draw_sbar (sbar, cols);
+        draw_top (win.top,  cols);
+        draw_left(win.left, ch, pane_w, list_top);
+        if(layout == LAYOUT_FULL && win.rite)
+            draw_right(win.rite, ch, rw);
+        draw_sbar(win.sbar, cols);
 
-        if(celebrate>0){draw_celebrate(rows,cols);celebrate--;}
+        if(celebrate>0){ draw_celebrate(rows,cols); celebrate--; }
 
         doupdate();
 
-        timeout(celebrate>0?150:-1);
+        timeout(celebrate>0 ? 150 : -1);
         if(smsg_ttl>0) smsg_ttl--;
 
         int key=getch();
@@ -850,8 +936,7 @@ int main(void){
     }
 
     free(todo_path);
-
-    delwin(top);delwin(left);delwin(rite);delwin(sbar);
+    free_windows(&win);
     endwin();
     printf("bye bye~ =^..^=\n");
     return 0;
