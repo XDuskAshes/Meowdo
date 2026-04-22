@@ -36,6 +36,25 @@ It runs in your terminal, supports tags, search, pinning, and saves everything i
 | macOS (Homebrew) | `brew install ncurses` |
 | Fedora | `sudo dnf install ncurses-devel` |
 
+## Installation
+
+### Arch Linux (AUR)
+```bash
+yay -S meowdo
+```
+Or any other AUR helper. Package maintained by [Just_fauna](https://aur.archlinux.org/packages/meowdo).
+
+### From source
+```bash
+git clone https://github.com/Sycorlax/Meowdo.git
+cd Meowdo
+make
+```
+
+### Nix/NixOS
+*(see [Build](#build) section below)*
+
+
 ### Build
 
 ```bash
@@ -196,6 +215,11 @@ Pull requests are welcome! Please ensure:
 - Code compiles without warnings (`-Wall -Wextra`)
 - The GitHub Actions build passes
 
+## Acknowledgements
+
+- [Just_fauna](https://aur.archlinux.org/packages/meowdo) – AUR packaging and maintenance
+- [Dusk](https://github.com/XDuskAshes/) – Nix flake & package support, working on nixpkgs submission
+ 
 ## License
 
 [GPL-3.0](LICENSE) – see LICENSE file for details.
