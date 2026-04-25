@@ -345,12 +345,14 @@ static Layout get_layout(int rows, int cols) {
  * tracking display columns consumed on the current line.  When a
  * character would overflow the line we move to the next row.
  */
-static void popup_draw_field(WINDOW *win, int start_row, int field_w,
+/* max_row: last row the field may use. For a window of height ph:
+ *   ph-1 = bottom border (box), ph-2 = hint bar -> max_row = ph-3 */
+static void popup_draw_field(WINDOW *win, int start_row, int max_row, int field_w,
                              const char *s,
                              int *cur_row_out, int *cur_col_out)
 {
-    /* clear all field rows first — up to 8 extra lines is plenty */
-    for (int r = start_row; r < start_row + 8; r++)
+    /* clear only the valid field rows — never touch hint bar or border */
+    for (int r = start_row; r <= max_row; r++)
         mvwprintw(win, r, 3, "%-*s", field_w + 2, "");
 
     wattron(win, COLOR_PAIR(C_PEND)|A_BOLD);
@@ -368,7 +370,7 @@ static void popup_draw_field(WINDOW *win, int start_row, int field_w,
         if (mb <= 0) { p++; continue; }   /* skip invalid bytes */
 
         int wcw = wcwidth(wc);
-        if (wcw < 0) wcw = 0;             /* non-printable → 0 width */
+        if (wcw < 0) wcw = 0;             /* non-printable -> 0 width */
 
         /* wrap to next line if this char doesn't fit */
         if (col_used + wcw > field_w) {
@@ -376,9 +378,10 @@ static void popup_draw_field(WINDOW *win, int start_row, int field_w,
             wattron(win, COLOR_PAIR(C_PEND)|A_BOLD);
             mvwprintw(win, row, col, "%-*s", field_w - col_used, "");
             wattroff(win, COLOR_PAIR(C_PEND)|A_BOLD);
+            if (row >= max_row) break;     /* no room — stop drawing */
             row++;
             col = 5; col_used = 0;
-            /* continuation lines: no "> " prefix, just indent */
+            /* continuation lines: two-space indent to align with "> " */
             wattron(win, COLOR_PAIR(C_PEND)|A_BOLD);
             mvwprintw(win, row, 3, "  ");
             wattroff(win, COLOR_PAIR(C_PEND)|A_BOLD);
@@ -470,7 +473,7 @@ static int popup(const char *title, const char *hint, char *out, int maxlen){
         wattron(p,COLOR_PAIR(C_TOPBAR)|A_BOLD); mvwprintw(p,0,2," %s ",title); wattroff(p,COLOR_PAIR(C_TOPBAR)|A_BOLD); \
         if(hint&&hint[0]){wattron(p,A_DIM); mvwprintw(p,2,3,"%.*s",pw-6,hint); wattroff(p,A_DIM);} \
         wattron(p,A_DIM); mvwprintw(p,ph-2,3," Enter:confirm   Esc:cancel "); wattroff(p,A_DIM); \
-        popup_draw_field(p, 4, field_w, out, &cur_row, &cur_col); \
+        popup_draw_field(p, 4, ph-3, field_w, out, &cur_row, &cur_col); \
     } while(0)
 
     curs_set(1);
