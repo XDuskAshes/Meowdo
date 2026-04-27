@@ -329,6 +329,23 @@ static Layout get_layout(int rows, int cols) {
 }
 
 
+/* ------ utf-8 multibyte helpers ------ */
+/* safely truncate text to fit display width; returns display cols used */
+static int trunc_to_width(const char *src, char *dst, int dst_size, int max_width){
+    int w_used=0, byte_len=0;
+    while(*src && byte_len<dst_size-1){
+        wchar_t wc;
+        int mb=mbtowc(&wc,src,MB_CUR_MAX);
+        if(mb<=0) break;
+        int wcw=wcwidth(wc); if(wcw<0) wcw=0;
+        if(w_used+wcw>max_width) break;
+        memcpy(dst,src,(size_t)mb);
+        dst+=mb; src+=mb; w_used+=wcw; byte_len+=mb;
+    }
+    *dst='\0';
+    return w_used;
+}
+
 static void popup_draw_field(WINDOW *win, int start_row, int max_row, int field_w,
                              const char *s,
                              int *cur_row_out, int *cur_col_out)
@@ -448,6 +465,16 @@ static int popup(const char *title, const char *hint, char *out, int maxlen){
         int ch = wgetch(p);
         if (ch == 27 || ch == KEY_F(1)) { out[0]='\0'; cancelled=1; break; }
         if (ch == '\n' || ch == '\r') break;
+        
+        /* silently ignore navigation keys (don't pass to main loop) */
+        if (ch == KEY_UP || ch == KEY_DOWN || ch == KEY_LEFT || ch == KEY_RIGHT ||
+            ch == KEY_HOME || ch == KEY_END || ch == KEY_PPAGE || ch == KEY_NPAGE ||
+            ch == 'k' || ch == 'j' || ch == 'g' || ch == 'G' || ch == 'd' || ch == 'D') {
+            /* just redraw and keep waiting for valid input */
+            POPUP_REDRAW();
+            wmove(p, cur_row, cur_col); wrefresh(p);
+            continue;
+        }
 
         if ((ch == KEY_BACKSPACE || ch == 127 || ch == '\b') && len > 0) {
             /* walk back past UTF-8 continuation bytes (10xxxxxx) */
@@ -493,7 +520,7 @@ static void draw_toosmall(int rows, int cols) {
     static const char *lines[] = {
         "=^..^=",
         "terminal too small~",
-        "please resize nya!",
+        "please resize and get me some water and why not some pizza nya!",
     };
     int n = 3;
     int sy = rows/2 - n/2; if(sy<0) sy=0;
@@ -675,7 +702,13 @@ static void draw_left(WINDOW *w,int h,int lw,int top){
         else if(t->done)  {wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_DONE)|A_DIM);}
         else if(t->pinned){wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_PIN));}
         else              {wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_PEND));}
-        mvwprintw(w,row,tx," %-*.*s",avail,avail,t->text);
+        /* safely truncate multibyte text to display width */
+        char clipped[MAX_LINE];
+        int w_used=trunc_to_width(t->text,clipped,sizeof clipped,avail);
+        mvwaddch(w,row,tx,' ');
+        waddstr(w,clipped);
+        /* pad remaining space */
+        for(int p=0;p<avail-w_used;p++) waddch(w,' ');
         wattrset(w,A_NORMAL);
     }
     wnoutrefresh(w);
@@ -748,13 +781,41 @@ static void draw_right(WINDOW *w,int h,int rw){
         Todo *t=&todos[vis[sel]];
         wattron(w,COLOR_PAIR(C_BORDER)|A_DIM); mvwhline(w,ty,2,ACS_HLINE,ca); wattroff(w,COLOR_PAIR(C_BORDER)|A_DIM); ty++;
         wattron(w,COLOR_PAIR(C_HDR)|A_BOLD); mvwprintw(w,ty++,2,"[ SELECTED ]"); wattroff(w,COLOR_PAIR(C_HDR)|A_BOLD);
-        int tlen=(int)strlen(t->text);
-        for(int s=0;s<tlen&&ty<h-3;){
-            int end=s+ca-2; if(end>tlen)end=tlen;
+        
+        /* word-wrap with multibyte safety and ellipsis for truncation */
+        const char *src=t->text;
+        while(*src && ty<h-3){
+            char line_buf[MAX_LINE];
+            int col_used=0, limit=ca-2;
+            
+            /* truncate line safely to display width */
+            char *dst=line_buf;
+            bool more_text=false;
+            while(*src && col_used<limit){
+                wchar_t wc;
+                int mb=mbtowc(&wc,src,MB_CUR_MAX);
+                if(mb<=0) break;
+                int wcw=wcwidth(wc); if(wcw<0) wcw=0;
+                if(col_used+wcw>limit){ more_text=true; break; }
+                memcpy(dst,src,(size_t)mb);
+                dst+=mb; src+=mb; col_used+=wcw;
+            }
+            *dst='\0';
+            
+            /* add ellipsis if text continues and we're at end of visible area */
+            if(more_text && ty>=h-4){
+                if(col_used>=2 && dst>line_buf){
+                    /* trim last char to make room for ellipsis */
+                    dst--;
+                    strcpy(dst,"…");
+                }
+            }
+            
             wattron(w,COLOR_PAIR(C_PEND)|A_BOLD);
-            mvwprintw(w,ty++,3,"%.*s",end-s,t->text+s);
+            mvwaddch(w,ty,3,' ');  /* position cursor */
+            waddstr(w,line_buf);   /* add UTF-8 text safely */
             wattroff(w,COLOR_PAIR(C_PEND)|A_BOLD);
-            s=end;
+            ty++;
         }
         if(t->pinned&&ty<h-3){
             wattron(w,COLOR_PAIR(C_PIN)|A_DIM); mvwprintw(w,ty++,3,"* pinned"); wattroff(w,COLOR_PAIR(C_PIN)|A_DIM);
@@ -820,7 +881,13 @@ int main(void){
     g_utf8 = detect_utf8();
     BONGO   = g_utf8 ? BONGO_UTF8 : BONGO_ASCII;
     build_paths();
-    initscr(); cbreak(); noecho(); curs_set(0);
+    initscr(); 
+    /* enable wide-character support for UTF-8 rendering */
+    if(g_utf8) {
+        cbreak(); noecho(); curs_set(0);
+    } else {
+        cbreak(); noecho(); curs_set(0);
+    }
     keypad(stdscr,TRUE);
     if(!has_colors()){endwin();puts("need color terminal");return 1;}
     start_color(); use_default_colors();
@@ -934,6 +1001,8 @@ int main(void){
                 todo_count++; todos_save(); rebuild_vis(); sel=vis_count-1;
                 set_smsg("task added! nya~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -946,6 +1015,8 @@ int main(void){
                 snprintf(t->text, MAX_LINE, "%s", buf);
                 todos_save(); rebuild_vis(); set_smsg("task updated! nya~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -989,6 +1060,8 @@ int main(void){
                 set_smsg("tag set!");
             } else {snprintf(t->tag, MAX_TAG, "none");set_smsg("tag cleared");}
             todos_save(); rebuild_vis(); mark_dirty();
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -1003,6 +1076,8 @@ int main(void){
                 todo_count--; if(sel>0&&sel>=vis_count-1) sel--;
                 todos_save(); rebuild_vis(); set_smsg("deleted! poof~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -1016,6 +1091,8 @@ int main(void){
                 todos_save(); rebuild_vis(); mark_dirty();
                 set_smsg("clean slate! fresh start nya~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -1025,6 +1102,8 @@ int main(void){
                 snprintf(search,sizeof search,"%s",buf);
             else search[0]='\0';
             sel=0; list_top=0; rebuild_vis();
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
