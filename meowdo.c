@@ -520,7 +520,7 @@ static void draw_toosmall(int rows, int cols) {
     static const char *lines[] = {
         "=^..^=",
         "terminal too small~",
-        "please resize and get me some water and why not some pizza nya!",
+        "please resize nya!",
     };
     int n = 3;
     int sy = rows/2 - n/2; if(sy<0) sy=0;
@@ -867,12 +867,13 @@ static bool alloc_windows(Windows *w, int rows, int cols, int lw, int rw, int ch
     if(layout == LAYOUT_FULL){
         w->left = newwin(ch, lw,   1,  0);
         w->rite = newwin(ch, rw,   1, lw);
+        return (w->top && w->left && w->rite && w->sbar);
     } else {
         /* compact: left pane takes full width */
         w->left = newwin(ch, cols, 1, 0);
         w->rite = NULL;
+        return (w->top && w->left && w->sbar);
     }
-    return (w->top && w->left && w->sbar);
 }
 
 /* ------ main ------ */
@@ -882,7 +883,6 @@ int main(void){
     BONGO   = g_utf8 ? BONGO_UTF8 : BONGO_ASCII;
     build_paths();
     initscr(); 
-    /* enable wide-character support for UTF-8 rendering */
     cbreak(); noecho(); curs_set(0);
     keypad(stdscr,TRUE);
     if(!has_colors()){endwin();puts("need color terminal");return 1;}
@@ -1069,8 +1069,11 @@ int main(void){
             if(buf[0]=='y'||buf[0]=='Y'){
                 int ti=vis[sel];
                 for(int i=ti;i<todo_count-1;i++) todos[i]=todos[i+1];
-                todo_count--; if(sel>0&&sel>=vis_count-1) sel--;
-                todos_save(); rebuild_vis(); set_smsg("deleted! poof~");
+                todo_count--; 
+                todos_save(); rebuild_vis();
+                /* adjust selection after visibility rebuild */
+                if(sel>=vis_count) sel=vis_count>0?vis_count-1:0;
+                set_smsg("deleted! poof~");
             }
             /* flush any queued input from popup interaction */
             timeout(0); while(getch()!=ERR); timeout(-1);
