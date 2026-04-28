@@ -1,6 +1,6 @@
 /*
  * meowdo  ---  a cute bongo cat todo list ---
- *
+ *										1.3	VERSION	
  * compile:  gcc -O2 -o meowdo meowdo.c -lncursesw       (all distros, wide-char)
  * arch:     sudo pacman -S ncurses
  * debian:   sudo apt install libncursesw5-dev
