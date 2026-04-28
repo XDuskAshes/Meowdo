@@ -883,11 +883,7 @@ int main(void){
     build_paths();
     initscr(); 
     /* enable wide-character support for UTF-8 rendering */
-    if(g_utf8) {
-        cbreak(); noecho(); curs_set(0);
-    } else {
-        cbreak(); noecho(); curs_set(0);
-    }
+    cbreak(); noecho(); curs_set(0);
     keypad(stdscr,TRUE);
     if(!has_colors()){endwin();puts("need color terminal");return 1;}
     start_color(); use_default_colors();
