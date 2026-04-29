@@ -1,8 +1,7 @@
 /*
  * meowdo  ---  a cute bongo cat todo list ---
- *
- * compile:  gcc -O2 -o meowdo meowdo.c -lncurses        (Arch / most distros)
- *           gcc -O2 -o meowdo meowdo.c -lncursesw       (Debian / Ubuntu)
+ *										1.3	VERSION	
+ * compile:  gcc -O2 -o meowdo meowdo.c -lncursesw       (all distros, wide-char)
  * arch:     sudo pacman -S ncurses
  * debian:   sudo apt install libncursesw5-dev
  *
@@ -41,6 +40,7 @@
 #include <time.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <wchar.h>
 
 /* ------ constants ------ */
 #define MAX_TODOS  1024
@@ -328,42 +328,187 @@ static Layout get_layout(int rows, int cols) {
     return LAYOUT_FULL;
 }
 
-/* ------ popup ------ */
-static int popup(const char *title,const char *hint,char *out,int maxlen){
-    int rows,cols; getmaxyx(stdscr,rows,cols);
-    int pw=(cols<74)?cols-4:74, ph=7;
-    if(pw<20||rows<ph+2) return 0;   /* terminal too small for popup */
-    int py=rows/2-ph/2, px=(cols-pw)/2;
-    WINDOW *p=newwin(ph,pw,py,px); if(!p) return 0;
 
-    wattron(p,COLOR_PAIR(C_BORDER)|A_BOLD); box(p,0,0); wattroff(p,COLOR_PAIR(C_BORDER)|A_BOLD);
-    wattron(p,COLOR_PAIR(C_TOPBAR)|A_BOLD); mvwprintw(p,0,2," %s ",title); wattroff(p,COLOR_PAIR(C_TOPBAR)|A_BOLD);
-    if(hint&&hint[0]){wattron(p,A_DIM); mvwprintw(p,2,3,"%.*s",pw-6,hint); wattroff(p,A_DIM);}
-    wattron(p,COLOR_PAIR(C_PEND)|A_BOLD); mvwprintw(p,4,3,"> "); wattroff(p,COLOR_PAIR(C_PEND)|A_BOLD);
-    wattron(p,A_DIM); mvwprintw(p,ph-1,3," Enter:confirm   Esc:cancel "); wattroff(p,A_DIM);
+/* ------ utf-8 multibyte helpers ------ */
+/* safely truncate text to fit display width; returns display cols used */
+static int trunc_to_width(const char *src, char *dst, int dst_size, int max_width){
+    int w_used=0, byte_len=0;
+    while(*src && byte_len<dst_size-1){
+        wchar_t wc;
+        int mb=mbtowc(&wc,src,MB_CUR_MAX);
+        if(mb<=0) break;
+        int wcw=wcwidth(wc); if(wcw<0) wcw=0;
+        if(w_used+wcw>max_width) break;
+        memcpy(dst,src,(size_t)mb);
+        dst+=mb; src+=mb; w_used+=wcw; byte_len+=mb;
+    }
+    *dst='\0';
+    return w_used;
+}
+
+static void popup_draw_field(WINDOW *win, int start_row, int max_row, int field_w,
+                             const char *s,
+                             int *cur_row_out, int *cur_col_out)
+{
+    /* clear only the valid field rows — never touch hint bar or border */
+    for (int r = start_row; r <= max_row; r++)
+        mvwprintw(win, r, 3, "%-*s", field_w + 2, "");
+
+    wattron(win, COLOR_PAIR(C_PEND)|A_BOLD);
+    mvwprintw(win, start_row, 3, "> ");
+    wattroff(win, COLOR_PAIR(C_PEND)|A_BOLD);
+
+    int row = start_row;
+    int col = 5;          /* column after "> " */
+    int col_used = 0;     /* display columns used on this line */
+    const char *p = s;
+
+    while (*p) {
+        wchar_t wc;
+        int mb = mbtowc(&wc, p, MB_CUR_MAX);
+        if (mb <= 0) { p++; continue; }   /* skip invalid bytes */
+
+        int wcw = wcwidth(wc);
+        if (wcw < 0) wcw = 0;             /* non-printable -> 0 width */
+
+        /* wrap to next line if this char doesn't fit */
+        if (col_used + wcw > field_w) {
+            /* pad remainder of current line */
+            wattron(win, COLOR_PAIR(C_PEND)|A_BOLD);
+            mvwprintw(win, row, col, "%-*s", field_w - col_used, "");
+            wattroff(win, COLOR_PAIR(C_PEND)|A_BOLD);
+            if (row >= max_row) break;     /* no room — stop drawing */
+            row++;
+            col = 5; col_used = 0;
+            /* continuation lines: two-space indent to align with "> " */
+            wattron(win, COLOR_PAIR(C_PEND)|A_BOLD);
+            mvwprintw(win, row, 3, "  ");
+            wattroff(win, COLOR_PAIR(C_PEND)|A_BOLD);
+        }
+
+        /* print the character */
+        char mb_buf[MB_CUR_MAX + 1];
+        memcpy(mb_buf, p, (size_t)mb);
+        mb_buf[mb] = '\0';
+        wattron(win, COLOR_PAIR(C_PEND)|A_BOLD);
+        mvwprintw(win, row, col, "%s", mb_buf);
+        wattroff(win, COLOR_PAIR(C_PEND)|A_BOLD);
+
+        col      += wcw;
+        col_used += wcw;
+        p        += mb;
+    }
+
+    *cur_row_out = row;
+    *cur_col_out = col;
+}
+
+static int popup_needed_rows(const char *s, int field_w) {
+    if (!s || !s[0] || field_w < 1) return 1;
+    int rows = 1, col_used = 0;
+    const char *p = s;
+    while (*p) {
+        wchar_t wc;
+        int mb = mbtowc(&wc, p, MB_CUR_MAX);
+        if (mb <= 0) { p++; continue; }
+        int wcw = wcwidth(wc); if (wcw < 0) wcw = 0;
+        if (col_used + wcw > field_w) { rows++; col_used = 0; }
+        col_used += wcw;
+        p += mb;
+    }
+    return rows;
+}
+
+
+static int popup(const char *title, const char *hint, char *out, int maxlen){
+    int rows, cols; getmaxyx(stdscr, rows, cols);
+    int pw = (cols < 74) ? cols - 4 : 74;
+    if (pw < 20 || rows < 9) return 0;
+
+    int field_w = pw - 7;   
+    
+    #define PH_FOR(fr) ((fr) + 7)
+
+    #define CLAMP_PH(ph) do { \
+        if ((ph) > rows - 2) (ph) = rows - 2; \
+        if ((ph) < PH_FOR(1)) (ph) = PH_FOR(1); \
+    } while(0)
+
+    int field_rows = popup_needed_rows(out, field_w);
+    if (field_rows < 1) field_rows = 1;
+    int ph = PH_FOR(field_rows);
+    CLAMP_PH(ph);
+
+    int px = (cols - pw) / 2;
+    int py = rows/2 - ph/2;
+    WINDOW *p = newwin(ph, pw, py, px); if (!p) return 0;
+
+    /* full redraw: chrome + field, bottom bar always at ph-2 (inside border) */
+    #define POPUP_REDRAW() do { \
+        werase(p); \
+        wattron(p,COLOR_PAIR(C_BORDER)|A_BOLD); box(p,0,0); wattroff(p,COLOR_PAIR(C_BORDER)|A_BOLD); \
+        wattron(p,COLOR_PAIR(C_TOPBAR)|A_BOLD); mvwprintw(p,0,2," %s ",title); wattroff(p,COLOR_PAIR(C_TOPBAR)|A_BOLD); \
+        if(hint&&hint[0]){wattron(p,A_DIM); mvwprintw(p,2,3,"%.*s",pw-6,hint); wattroff(p,A_DIM);} \
+        wattron(p,A_DIM); mvwprintw(p,ph-2,3," Enter:confirm   Esc:cancel "); wattroff(p,A_DIM); \
+        popup_draw_field(p, 4, ph-3, field_w, out, &cur_row, &cur_col); \
+    } while(0)
 
     curs_set(1);
-    int len=(int)strnlen(out,(size_t)(maxlen-1));
-    int cancelled=0, field_w=pw-7;
+    int len = (int)strnlen(out, (size_t)(maxlen-1));
+    int cancelled = 0;
+    int cur_row = 4, cur_col = 5;
 
-    wattron(p,COLOR_PAIR(C_PEND)|A_BOLD);
-    mvwprintw(p,4,3,"> %-*.*s",field_w,field_w,out);
-    wattroff(p,COLOR_PAIR(C_PEND)|A_BOLD);
-    wmove(p,4,5+len); wrefresh(p);
+    POPUP_REDRAW();
+    wmove(p, cur_row, cur_col); wrefresh(p);
 
-    while(1){
-        int ch=wgetch(p);
-        if(ch==27||ch==KEY_F(1)){out[0]='\0';cancelled=1;break;}
-        if(ch=='\n'||ch=='\r') break;
-        if((ch==KEY_BACKSPACE||ch==127||ch=='\b')&&len>0){out[--len]='\0';}
-        else if(ch>=32&&ch<256&&len<maxlen-1){out[len++]=(char)ch;out[len]='\0';}
-        wattron(p,COLOR_PAIR(C_PEND)|A_BOLD);
-        mvwprintw(p,4,3,"> %-*.*s",field_w,field_w,out);
-        wattroff(p,COLOR_PAIR(C_PEND)|A_BOLD);
-        wmove(p,4,5+len); wrefresh(p);
+    while (1) {
+        int ch = wgetch(p);
+        if (ch == 27 || ch == KEY_F(1)) { out[0]='\0'; cancelled=1; break; }
+        if (ch == '\n' || ch == '\r') break;
+        
+        /* silently ignore navigation keys (don't pass to main loop) */
+        if (ch == KEY_UP || ch == KEY_DOWN || ch == KEY_LEFT || ch == KEY_RIGHT ||
+            ch == KEY_HOME || ch == KEY_END || ch == KEY_PPAGE || ch == KEY_NPAGE ||
+            ch == 'k' || ch == 'j' || ch == 'g' || ch == 'G' || ch == 'd' || ch == 'D') {
+            /* just redraw and keep waiting for valid input */
+            POPUP_REDRAW();
+            wmove(p, cur_row, cur_col); wrefresh(p);
+            continue;
+        }
+
+        if ((ch == KEY_BACKSPACE || ch == 127 || ch == '\b') && len > 0) {
+            /* walk back past UTF-8 continuation bytes (10xxxxxx) */
+            do { len--; } while (len > 0 && ((unsigned char)out[len] & 0xC0) == 0x80);
+            out[len] = '\0';
+        }
+        /* accept bytes ≥ 0x80 so UTF-8 continuation bytes pass through */
+        else if (((ch >= 32 && ch < 256) || (ch & 0x80)) && len < maxlen-1) {
+            out[len++] = (char)ch; out[len] = '\0';
+        }
+
+        /* resize popup if text now wraps to a different number of lines */
+        int new_fr = popup_needed_rows(out, field_w);
+        if (new_fr < 1) new_fr = 1;
+        int new_ph = PH_FOR(new_fr);
+        CLAMP_PH(new_ph);
+
+        if (new_ph != ph) {
+            ph = new_ph;
+            delwin(p);
+            py = rows/2 - ph/2;
+            p = newwin(ph, pw, py, px);
+            if (!p) break;
+        }
+
+        POPUP_REDRAW();
+        wmove(p, cur_row, cur_col); wrefresh(p);
     }
+
+    #undef POPUP_REDRAW
+    #undef PH_FOR
+    #undef CLAMP_PH
     curs_set(0); delwin(p); touchwin(stdscr); refresh();
-    return(!cancelled&&len>0);
+    return (!cancelled && len > 0);
 }
 
 /* ------ draw: too small overlay ------ */
@@ -375,7 +520,7 @@ static void draw_toosmall(int rows, int cols) {
     static const char *lines[] = {
         "=^..^=",
         "terminal too small~",
-        "please resize nya!",
+        "please resize and bring me some coffe nya!",
     };
     int n = 3;
     int sy = rows/2 - n/2; if(sy<0) sy=0;
@@ -557,7 +702,13 @@ static void draw_left(WINDOW *w,int h,int lw,int top){
         else if(t->done)  {wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_DONE)|A_DIM);}
         else if(t->pinned){wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_PIN));}
         else              {wattrset(w,A_NORMAL);wattron(w,COLOR_PAIR(C_PEND));}
-        mvwprintw(w,row,tx," %-*.*s",avail,avail,t->text);
+        /* safely truncate multibyte text to display width */
+        char clipped[MAX_LINE];
+        int w_used=trunc_to_width(t->text,clipped,sizeof clipped,avail);
+        mvwaddch(w,row,tx,' ');
+        waddstr(w,clipped);
+        /* pad remaining space */
+        for(int p=0;p<avail-w_used;p++) waddch(w,' ');
         wattrset(w,A_NORMAL);
     }
     wnoutrefresh(w);
@@ -630,13 +781,41 @@ static void draw_right(WINDOW *w,int h,int rw){
         Todo *t=&todos[vis[sel]];
         wattron(w,COLOR_PAIR(C_BORDER)|A_DIM); mvwhline(w,ty,2,ACS_HLINE,ca); wattroff(w,COLOR_PAIR(C_BORDER)|A_DIM); ty++;
         wattron(w,COLOR_PAIR(C_HDR)|A_BOLD); mvwprintw(w,ty++,2,"[ SELECTED ]"); wattroff(w,COLOR_PAIR(C_HDR)|A_BOLD);
-        int tlen=(int)strlen(t->text);
-        for(int s=0;s<tlen&&ty<h-3;){
-            int end=s+ca-2; if(end>tlen)end=tlen;
+        
+        /* word-wrap with multibyte safety and ellipsis for truncation */
+        const char *src=t->text;
+        while(*src && ty<h-3){
+            char line_buf[MAX_LINE];
+            int col_used=0, limit=ca-2;
+            
+            /* truncate line safely to display width */
+            char *dst=line_buf;
+            bool more_text=false;
+            while(*src && col_used<limit){
+                wchar_t wc;
+                int mb=mbtowc(&wc,src,MB_CUR_MAX);
+                if(mb<=0) break;
+                int wcw=wcwidth(wc); if(wcw<0) wcw=0;
+                if(col_used+wcw>limit){ more_text=true; break; }
+                memcpy(dst,src,(size_t)mb);
+                dst+=mb; src+=mb; col_used+=wcw;
+            }
+            *dst='\0';
+            
+            /* add ellipsis if text continues and we're at end of visible area */
+            if(more_text && ty>=h-4){
+                if(col_used>=2 && dst>line_buf){
+                    /* trim last char to make room for ellipsis */
+                    dst--;
+                    strcpy(dst,"…");
+                }
+            }
+            
             wattron(w,COLOR_PAIR(C_PEND)|A_BOLD);
-            mvwprintw(w,ty++,3,"%.*s",end-s,t->text+s);
+            mvwaddch(w,ty,3,' ');  /* position cursor */
+            waddstr(w,line_buf);   /* add UTF-8 text safely */
             wattroff(w,COLOR_PAIR(C_PEND)|A_BOLD);
-            s=end;
+            ty++;
         }
         if(t->pinned&&ty<h-3){
             wattron(w,COLOR_PAIR(C_PIN)|A_DIM); mvwprintw(w,ty++,3,"* pinned"); wattroff(w,COLOR_PAIR(C_PIN)|A_DIM);
@@ -688,12 +867,13 @@ static bool alloc_windows(Windows *w, int rows, int cols, int lw, int rw, int ch
     if(layout == LAYOUT_FULL){
         w->left = newwin(ch, lw,   1,  0);
         w->rite = newwin(ch, rw,   1, lw);
+        return (w->top && w->left && w->rite && w->sbar);
     } else {
         /* compact: left pane takes full width */
         w->left = newwin(ch, cols, 1, 0);
         w->rite = NULL;
+        return (w->top && w->left && w->sbar);
     }
-    return (w->top && w->left && w->sbar);
 }
 
 /* ------ main ------ */
@@ -702,7 +882,8 @@ int main(void){
     g_utf8 = detect_utf8();
     BONGO   = g_utf8 ? BONGO_UTF8 : BONGO_ASCII;
     build_paths();
-    initscr(); cbreak(); noecho(); curs_set(0);
+    initscr(); 
+    cbreak(); noecho(); curs_set(0);
     keypad(stdscr,TRUE);
     if(!has_colors()){endwin();puts("need color terminal");return 1;}
     start_color(); use_default_colors();
@@ -816,6 +997,8 @@ int main(void){
                 todo_count++; todos_save(); rebuild_vis(); sel=vis_count-1;
                 set_smsg("task added! nya~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -828,6 +1011,8 @@ int main(void){
                 snprintf(t->text, MAX_LINE, "%s", buf);
                 todos_save(); rebuild_vis(); set_smsg("task updated! nya~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -871,6 +1056,8 @@ int main(void){
                 set_smsg("tag set!");
             } else {snprintf(t->tag, MAX_TAG, "none");set_smsg("tag cleared");}
             todos_save(); rebuild_vis(); mark_dirty();
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -882,9 +1069,14 @@ int main(void){
             if(buf[0]=='y'||buf[0]=='Y'){
                 int ti=vis[sel];
                 for(int i=ti;i<todo_count-1;i++) todos[i]=todos[i+1];
-                todo_count--; if(sel>0&&sel>=vis_count-1) sel--;
-                todos_save(); rebuild_vis(); set_smsg("deleted! poof~");
+                todo_count--; 
+                todos_save(); rebuild_vis();
+                /* adjust selection after visibility rebuild */
+                if(sel>=vis_count) sel=vis_count>0?vis_count-1:0;
+                set_smsg("deleted! poof~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -898,6 +1090,8 @@ int main(void){
                 todos_save(); rebuild_vis(); mark_dirty();
                 set_smsg("clean slate! fresh start nya~");
             }
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
@@ -907,6 +1101,8 @@ int main(void){
                 snprintf(search,sizeof search,"%s",buf);
             else search[0]='\0';
             sel=0; list_top=0; rebuild_vis();
+            /* flush any queued input from popup interaction */
+            timeout(0); while(getch()!=ERR); timeout(-1);
             break;
         }
 
